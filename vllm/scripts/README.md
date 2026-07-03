@@ -65,9 +65,27 @@ git checkout releases/v0.23.0
 ```
 If for some reason vllm is looking for cuda13.0, try setting `VLLM_PRECOMPILED_WHEEL_VARIANT=cu128`
 
+
+##### Serving
+Set your token
 ```
-export MODEL="facebook/opt-125m"
 export HF_TOKEN=""
+```
+
+Set the model, use unsloth's gpt-oss-20b because vllm lists this one as supported on vllm cpu.
+```
+export MODEL="Qwen/Qwen3-30B-A3B"
+```
+
+Set the HF_HOME variable to the following location so we can share the model cache.
+```
+export HF_HOME="/data/huggingface"
+```
+
+add to bashrc
+```
+echo 'export HF_HOME=/data/huggingface' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 Start prefill service
@@ -169,15 +187,128 @@ export VLLM_CPU_OMP_THREADS_BIND="0,2,4,6,8,10,12,14,16,18,20,22|1,3,5,7,9,11,13
 
 ### serving a model
 ```
-VLLM_CPU_KVCACHE_SPACE=12 vllm serve allenai/OLMoE-1B-7B-0924     --dtype bfloat16     -tp 2     --distributed-executor-backend mp     --max-model-len 2048
+# VLLM_CPU_KVCACHE_SPACE=12 vllm serve Qwen/Qwen3-30B-A3B     --dtype bfloat16     -tp 2     --distributed-executor-backend mp     --max-model-len 2048
+export VLLM_CPU_OMP_THREADS_BIND=0-31
+export VLLM_CPU_KVCACHE_SPACE=32
+vllm serve Qwen/Qwen3-30B-A3B     --port 8000     --dtype auto
 ```
 
 then in a separate terminal, curl the endpoint
 ```
 curl http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
-    "model": "allenai/OLMoE-1B-7B-0924",
+    "model": "Qwen/Qwen3-30B-A3B",
     "prompt": "The primary structural difference between a operating system process and a thread is that",
     "max_tokens": 128,
     "temperature": 0.5
   }'
 ```
+
+# etc
+use `df -h` to see drive sizes
+```
+Filesystem                                       Size  Used Avail Use% Mounted on
+tmpfs                                             38G  2.2M   38G   1% /run
+/dev/sda3                                         63G  8.2G   52G  14% /
+tmpfs                                            189G     0  189G   0% /dev/shm
+tmpfs                                            5.0M     0  5.0M   0% /run/lock
+/dev/sda1                                        256M   11M  246M   5% /boot/efi
+ops.clemson.cloudlab.us:/proj/microfastpath-PG0  100G   70G   31G  70% /proj/microfastpath-PG0
+ops.clemson.cloudlab.us:/share                   500G  5.9G  495G   2% /share
+tmpfs                                             38G   16K   38G   1% /run/user/20004
+```
+
+and `lsblk` to see mounted disks
+```
+lsblk
+NAME    MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda       8:0    0 931.5G  0 disk
+├─sda1    8:1    0   256M  0 part /boot/efi
+├─sda2    8:2    0     1M  0 part
+├─sda3    8:3    0    64G  0 part /
+└─sda99 259:0    0     8G  0 part [SWAP]
+sdb       8:16   0 931.5G  0 disk
+```
+
+check to make sure it isnt already mounted by going to `/data`
+
+if you want to use the sbd disk, we need to format it
+```
+sudo mkfs.ext4 /dev/sdb
+```
+
+then mount it to a folder
+```
+# create the folder
+sudo mkdir -p /data
+
+# mount the drive to it
+sudo mount /dev/sdb /data
+
+# give your user ownership
+sudo chown -R $USER:$(id -gn) /data
+```
+
+add it to the filesystem directory so it doesnt unmount
+```
+echo '/dev/sdb /data ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
+```
+
+
+# docker
+### installing
+install with `./install-docker.sh`
+
+verify its running
+```
+sudo systemctl status docker
+```
+
+if not then start it
+```
+sudo systemctl start docker
+```
+
+add yourself to the docker group
+```
+sudo usermod -a -G docker $USER
+newgrp docker
+```
+
+### running
+```
+docker compose up -d
+```
+
+port forward (run on your laptop)
+```
+ssh -L 3000:127.0.0.1:3000 -i /path/to/your/cloudlab_key ctknab@your-cloudlab-hostname.edu
+```
+
+for example:
+```
+ssh -L 3000:127.0.0.1:3000 -i ~/.ssh/id_ed25519 ctknab@clnode246.clemson.cloudlab.us
+```
+
+then go to 
+```
+http://localhost:3000
+```
+
+and login with username: admin, password: admin. skip the prompt to change the default password.
+
+### benchmarking
+download the dataset
+```
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+```
+
+run the benchmark
+```
+vllm bench serve     --backend vllm     --base-url http://localhost:8000     --model Qwen/Qwen3-30B-A3B     --dataset-name sharegpt --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json     --num-prompts 20     --request-rate 2.0
+```
+
+running with different batch sizes
+```
+ vllm bench serve     --backend vllm     --base-url http://localhost:8000     --model Qwen/Qwen3-30B-A3B     --dataset-name sharegpt --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json     --num-prompts 20     --request-rate inf --max-concurrency 1
+```
+change the `--max-concurrency`
