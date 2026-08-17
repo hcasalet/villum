@@ -62,6 +62,15 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        # Address advertised to remote peers; falls back to the bind
+        # address (side_channel_host) when no separate advertise host is
+        # configured. These differ when side_channel_host must be a local,
+        # bindable address (e.g. 0.0.0.0 or an internal IP) while remote
+        # peers on another network can only reach this instance via a
+        # different address (e.g. a NAT'd public IP).
+        self.side_channel_advertise_host = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_ADVERTISE_HOST or self.side_channel_host
+        )
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_index

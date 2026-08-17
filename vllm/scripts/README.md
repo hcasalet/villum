@@ -135,6 +135,7 @@ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /
 ```
 
 ```
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.12 --seed --managed-python
 source .venv/bin/activate
 ```

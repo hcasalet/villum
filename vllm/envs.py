@@ -213,6 +213,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_NIXL_SIDE_CHANNEL_ADVERTISE_HOST: str | None = None
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
@@ -1610,6 +1611,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(
         "VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Address advertised to remote NIXL peers for reaching this instance's
+    # side-channel, when it differs from the local bind address in
+    # VLLM_NIXL_SIDE_CHANNEL_HOST (e.g. a NAT'd/floating public IP that
+    # cannot itself be bound to a local interface). Defaults to
+    # VLLM_NIXL_SIDE_CHANNEL_HOST when unset.
+    "VLLM_NIXL_SIDE_CHANNEL_ADVERTISE_HOST": lambda: os.getenv(
+        "VLLM_NIXL_SIDE_CHANNEL_ADVERTISE_HOST"
     ),
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
