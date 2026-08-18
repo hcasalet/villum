@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,20 @@ def _get_speculative_compatibility_factors(
     }
 
 
+# Matches the setuptools_scm local-version segment appended after the git
+# commit hash (e.g. ".precompiled" in "0.1.dev19795+g6d8600b52.precompiled"
+# vs ".cpu" in "0.1.dev19795+g6d8600b52.cpu"), so GPU and CPU wheel builds
+# of the identical commit normalize to the same string.
+_BUILD_VARIANT_RE = re.compile(r"(\+g[0-9a-f]+)(\.\w+)*$")
+
+
+def _normalize_vllm_version(version: str) -> str:
+    """Strip build-variant local-version suffixes (e.g. '.precompiled' vs
+    '.cpu') from a setuptools_scm version string, while still keeping the
+    git commit hash so a genuinely different commit still mismatches."""
+    return _BUILD_VARIANT_RE.sub(r"\1", version)
+
+
 def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig, attn_backend_name: str, cross_layers_blocks: bool
 ) -> str:
@@ -142,6 +157,25 @@ def compute_nixl_compatibility_hash(
     are validated at runtime in _validate_remote_agent_handshake and are not
     included in this hash to support heterogeneous deployments.
 
+    When kv_transfer_config.kv_connector_extra_config["heterogeneous_hardware_disagg"]
+    is set to true (must be set on BOTH the producer and consumer legs, since
+    each side computes and compares its own hash independently), two
+    additional factors are normalized before hashing rather than compared
+    as-is:
+    - vllm_version: the setuptools_scm build-variant suffix (e.g.
+      ".precompiled" vs ".cpu") is stripped, since GPU and CPU wheels built
+      from the identical commit otherwise report different version strings.
+    - attn_backend_name: excluded from the hash entirely, since a CPU
+      decode leg pairing with a GPU prefill leg is expected to report a
+      different attention backend. This is already accommodated at runtime
+      (see the `enable_heterogeneous_attn_post_process` handling for
+      `CPU_ATTN` in base_worker.py's handshake validation), so the hash
+      rejecting it earlier was blocking a case vLLM otherwise supports.
+    Every other factor (model, dtype, kv head count, cache dtype,
+    speculative config, etc.) is still hashed and compared strictly either
+    way, so this flag narrows the check rather than disabling it the way
+    `enforce_handshake_compat=false` does.
+
     Note - the set of factors are likely to evolve significantly over
     time to be more or less permissive.
 
@@ -155,9 +189,21 @@ def compute_nixl_compatibility_hash(
     cache_config = vllm_config.cache_config
     is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
 
+    heterogeneous_hw = bool(
+        vllm_config.kv_transfer_config
+        and vllm_config.kv_transfer_config.get_from_extra_config(
+            "heterogeneous_hardware_disagg", False
+        )
+    )
+    hashed_vllm_version = vllm_version
+    hashed_attn_backend_name = attn_backend_name
+    if heterogeneous_hw:
+        hashed_vllm_version = _normalize_vllm_version(vllm_version)
+        hashed_attn_backend_name = "heterogeneous"
+
     factors = {
         # Version compatibility
-        "vllm_version": vllm_version,
+        "vllm_version": hashed_vllm_version,
         "nixl_connector_version": NIXL_CONNECTOR_VERSION,
         # Model architecture - affects KV cache shape
         "model": model_config.model,
@@ -166,7 +212,7 @@ def compute_nixl_compatibility_hash(
         "head_size": model_config.get_head_size(),
         "num_hidden_layers": model_config.get_total_num_hidden_layers(),
         # Attention backend and KV cache dtype affect memory layout
-        "attn_backend_name": attn_backend_name,
+        "attn_backend_name": hashed_attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
         "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
@@ -184,6 +230,15 @@ def compute_nixl_compatibility_hash(
         factors["cache_dtype"],
         attn_backend_name,
     )
+    if heterogeneous_hw:
+        # Full factor dict, in case a mismatch persists after normalization
+        # (e.g. cross_layers_blocks differing due to a backend-specific
+        # block-layout heuristic) -- diff this against the remote side's
+        # log line to find the culprit directly instead of guessing.
+        logger.debug(
+            "NIXL compatibility factors (heterogeneous_hardware_disagg=true): %s",
+            factors,
+        )
     return compat_hash
 
 
