@@ -53,7 +53,12 @@ def is_pip_package_installed(package_name):
 def find_nixl_wheel_in_cache(cache_dir):
     """Finds a nixl wheel file in the specified cache directory."""
     # The repaired wheel will have a 'manylinux' tag, but this glob still works.
-    search_pattern = os.path.join(cache_dir, f"nixl*{NIXL_VERSION}*.whl")
+    # NIXL's wheel filenames are PEP 440-normalized and never carry a leading
+    # "v" (e.g. git tag "v1.2.0" -> wheel "nixl-1.2.0-...whl"). NIXL tags
+    # before 1.0 had no "v" prefix at all (e.g. "0.7.0"); tags from 1.0.0
+    # onward do (e.g. "v1.2.0"). Strip it here so the glob matches either era.
+    wheel_version = NIXL_VERSION.lstrip("v")
+    search_pattern = os.path.join(cache_dir, f"nixl*{wheel_version}*.whl")
     wheels = glob.glob(search_pattern)
     if wheels:
         # Sort to get the most recent/highest version if multiple exist
