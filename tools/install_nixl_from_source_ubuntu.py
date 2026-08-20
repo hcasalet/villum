@@ -82,7 +82,7 @@ def install_system_dependencies():
         )
         print(
             "  patchelf build-essential git cmake ninja-build \
-            autotools-dev automake meson libtool libtool-bin",
+            autotools-dev automake meson libtool libtool-bin liburing2",
             flush=True,
         )
         print("---\n", flush=True)
@@ -101,6 +101,11 @@ def install_system_dependencies():
         "libtool",
         "libtool-bin",
         "pkg-config",
+        # NIXL 1.x links against io_uring (used by its POSIX/file backend
+        # for async I/O); auditwheel's repair step needs the runtime .so
+        # on the system to vendor it into the wheel, even though this
+        # project only uses the UCX backend at runtime.
+        "liburing2",
     ]
     run_command(["apt-get", "update"])
     run_command(["apt-get", "install", "-y"] + apt_packages)

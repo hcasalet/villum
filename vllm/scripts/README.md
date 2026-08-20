@@ -130,7 +130,7 @@ ref: https://docs.vllm.ai/en/v0.17.1/getting_started/installation/cpu/#full-buil
 we need to build with compilation (only takes a couple minutes) because the Clemson c4130 does not have AVX-512 so it fails if you run without compiling.
 ```
 sudo apt-get update -y
-sudo apt-get install -y gcc-12 g++-12 libnuma-dev
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev patchelf liburing2
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
@@ -151,6 +151,7 @@ uv pip install nixl==1.3.0
 
 ```
 VLLM_TARGET_DEVICE=cpu uv pip install . --no-build-isolation
+python tools/install_nixl_from_source_ubuntu.py --force-reinstall
 ```
 
 
