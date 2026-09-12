@@ -60,6 +60,12 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    # NIXL memory type ("VRAM"/"DRAM") the advertised kv_caches_base_addr live in.
+    # A peer must build transfer descriptors for *our* regions with *our* type;
+    # with heterogeneous hardware (GPU prefill, CPU decode) it differs from its own.
+    # Defaults to "" for wire-compat with peers that predate this field, in which
+    # case the reader falls back to its own memory type (homogeneous assumption).
+    nixl_memory_type: str = ""
 
 
 @dataclass

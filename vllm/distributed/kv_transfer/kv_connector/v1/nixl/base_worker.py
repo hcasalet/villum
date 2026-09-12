@@ -1026,6 +1026,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            nixl_memory_type=self.nixl_memory_type,
         )
         assert self.compat_hash is not None
         encoder = msgspec.msgpack.Encoder()
@@ -1267,6 +1268,7 @@ class NixlBaseConnectorWorker:
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            nixl_memory_type=self.nixl_memory_type,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1687,8 +1689,21 @@ class NixlBaseConnectorWorker:
             mamba = self._build_mamba_remote(nixl_agent_meta, tp_ratio, transfer_info)
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        # Register with NIXL. These descriptors address the *remote* agent's
+        # regions, so they must carry the remote's memory type: with
+        # heterogeneous hardware (e.g. GPU prefill -> CPU decode) the remote KV
+        # lives in VRAM while ours is DRAM, and tagging them with our own type
+        # makes NIXL look for regions the remote never registered
+        # (NIXL_ERR_NOT_FOUND from prep_xfer_dlist).
+        remote_memory_type = nixl_agent_meta.nixl_memory_type or self.nixl_memory_type
+        if remote_memory_type != self.nixl_memory_type:
+            logger.info(
+                "Remote agent %s registers KV in %s memory, local KV is in %s",
+                engine_id,
+                remote_memory_type,
+                self.nixl_memory_type,
+            )
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, remote_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
