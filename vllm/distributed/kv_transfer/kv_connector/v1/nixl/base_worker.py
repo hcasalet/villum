@@ -1929,6 +1929,9 @@ class NixlBaseConnectorWorker:
                     group_block_ids,
                     "d2h",
                 )
+            self._debug_dump_kv(
+                "prefill", meta.local_physical_block_ids[0], self.host_xfer_buffers
+            )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
@@ -2050,11 +2053,39 @@ class NixlBaseConnectorWorker:
 
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
+        self._debug_dump_kv("decode_raw", block_ids, self.device_kv_caches)
         for _, cache_or_caches in self.device_kv_caches.items():
             current_platform.pack_kv_cache(
                 kv_cache=cache_or_caches,
                 indices=indices,
             )
+        self._debug_dump_kv("decode_packed", block_ids, self.device_kv_caches)
+
+    _debug_dump_counter = 0
+
+    def _debug_dump_kv(
+        self, tag: str, block_ids: list[int], caches: dict[str, torch.Tensor]
+    ) -> None:
+        """Debug aid: with VLLM_NIXL_DEBUG_DUMP=<dir>, save the given blocks of
+        every layer's cache as {layer_name: tensor[num_blocks, ...]} plus the
+        block ids, so P and D contents can be diffed offline. No-op otherwise."""
+        dump_dir = os.environ.get("VLLM_NIXL_DEBUG_DUMP")
+        if not dump_dir or not block_ids:
+            return
+        os.makedirs(dump_dir, exist_ok=True)
+        n = type(self)._debug_dump_counter
+        type(self)._debug_dump_counter += 1
+        idx = torch.tensor(block_ids, dtype=torch.long)
+        payload = {
+            "block_ids": list(block_ids),
+            "layers": {
+                name: cache.index_select(0, idx.to(cache.device)).cpu().clone()
+                for name, cache in caches.items()
+            },
+        }
+        path = os.path.join(dump_dir, f"{tag}_{n:03d}.pt")
+        torch.save(payload, path)
+        logger.info("NIXL debug dump: %s blocks=%s -> %s", tag, block_ids, path)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
