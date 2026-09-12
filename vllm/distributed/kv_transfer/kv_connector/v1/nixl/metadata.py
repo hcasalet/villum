@@ -3,7 +3,7 @@
 """Metadata dataclasses and helpers for the NIXL connector."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -66,6 +66,11 @@ class NixlAgentMetadata:
     # Defaults to "" for wire-compat with peers that predate this field, in which
     # case the reader falls back to its own memory type (homogeneous assumption).
     nixl_memory_type: str = ""
+    # Layer names in the order the KV regions (kv_caches_base_addr/block_lens)
+    # were registered. Regions are matched by position, so both sides must
+    # register in the same order; see NixlConnectorWorker._canonical_kv_caches.
+    # Empty for peers predating this field or for packed single-region caches.
+    layer_names: list[str] = field(default_factory=list)
 
 
 @dataclass

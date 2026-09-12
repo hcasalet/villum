@@ -5,6 +5,7 @@
 import itertools
 import logging
 import os
+import re
 import queue
 import threading
 import time
@@ -547,6 +548,8 @@ class NixlBaseConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
+        # Layer names in region order (parallel to block_len_per_layer).
+        self._registered_layer_names = list[str]()
 
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
@@ -1035,8 +1038,28 @@ class NixlBaseConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
+    @staticmethod
+    def _canonical_kv_caches(
+        kv_caches: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Return kv_caches ordered by layer name (natural sort: layer 2 < 10).
+
+        NIXL regions are matched between P and D by *position*, so both sides
+        must enumerate layers identically. The model runner's dict order is not
+        guaranteed to agree across platforms: e.g. for gpt-oss (alternating
+        full / sliding-window attention) the CUDA runner yields full-attention
+        layers first (0,2,4,..) while the CPU runner yields 0,1,2,.., silently
+        pairing each decode layer with the wrong prefill layer.
+        """
+
+        def natural_key(name: str) -> list[object]:
+            return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
+
+        return dict(sorted(kv_caches.items(), key=lambda kv: natural_key(kv[0])))
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        kv_caches = self._canonical_kv_caches(kv_caches)
 
         # Detect packed allocation: all tensors are strided views into the
         # same backing storage (different data_ptr but same storage).
@@ -1159,6 +1182,7 @@ class NixlBaseConnectorWorker:
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
             )
             seen_base_addresses.append(base_addr)
+            self._registered_layer_names.append(layer_name)
             # Only record non-Mamba page sizes.
             if isinstance(layer_spec, MambaSpec):
                 self.block_len_per_layer.append(
@@ -1269,6 +1293,7 @@ class NixlBaseConnectorWorker:
                 self._physical_blocks_per_logical_kv_block
             ),
             nixl_memory_type=self.nixl_memory_type,
+            layer_names=list(self._registered_layer_names),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1713,6 +1738,17 @@ class NixlBaseConnectorWorker:
     def _validate_remote_agent_handshake(
         self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
     ):
+        if (
+            nixl_agent_meta.layer_names
+            and self._registered_layer_names
+            and nixl_agent_meta.layer_names != self._registered_layer_names
+        ):
+            raise RuntimeError(
+                "NIXL KV region order differs between local and remote agent; "
+                "layers would be paired by position with the wrong remote layer. "
+                f"local={self._registered_layer_names[:6]}..., "
+                f"remote={nixl_agent_meta.layer_names[:6]}..."
+            )
         """
         Validate the remote agent handshake metadata ensuring the
         invariants hold true.
