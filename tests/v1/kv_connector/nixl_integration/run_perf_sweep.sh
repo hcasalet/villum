@@ -31,9 +31,10 @@ MODEL=""
 LABEL=""
 OUT_DIR=""
 DATASET_PATH="./ShareGPT_V3_unfiltered_cleaned_split.json"
-NUM_PROMPTS=1024
+NUM_PROMPTS_LIST=(1024)   # one value = same for every point; or one per concurrency level
 CONCURRENCY_LIST=(1 2 4 8 16 32 64 96 128 256)
 HEALTH_PATH="/healthcheck"  # /health for a bare (non-proxied) vllm serve
+EXTRA_ARGS=()   # extra flags passed straight through to `vllm bench serve`
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -48,16 +49,32 @@ while [[ $# -gt 0 ]]; do
     --dataset-path)
       DATASET_PATH="$2"; shift 2 ;;
     --num-prompts)
-      NUM_PROMPTS="$2"; shift 2 ;;
+      # Either a single value applied to every concurrency point, or a
+      # space-separated list matched positionally to --concurrency-list.
+      # A per-point count is needed when the arms differ by orders of magnitude
+      # in speed: a slow leg cannot afford many prompts at concurrency 1, while
+      # a high concurrency point needs at least as many prompts as its batch
+      # size or it never actually reaches that concurrency.
+      read -r -a NUM_PROMPTS_LIST <<< "$2"
+      shift 2 ;;
     --concurrency-list)
       # space-separated string, e.g. --concurrency-list "1 2 4 8"
       read -r -a CONCURRENCY_LIST <<< "$2"
       shift 2 ;;
     --health-path)
       HEALTH_PATH="$2"; shift 2 ;;
+    --extra-args)
+      # space-separated string forwarded verbatim to `vllm bench serve`, e.g.
+      #   --extra-args "--temperature 0 --sharegpt-output-len 128"
+      # Needed because the defaults are not comparable across arms: the bench
+      # client no longer forces greedy sampling, and with sharegpt output
+      # lengths coming from the dataset each arm averages over a different
+      # length distribution (and a CPU decode leg can run for hours).
+      read -r -a EXTRA_ARGS <<< "$2"
+      shift 2 ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 --base-url <url> --model <name> --label <label> --out-dir <dir> [--dataset-path <path>] [--num-prompts <n>] [--concurrency-list \"1 2 4 ...\"] [--health-path </health|/healthcheck>]"
+      echo "Usage: $0 --base-url <url> --model <name> --label <label> --out-dir <dir> [--dataset-path <path>] [--num-prompts <n>] [--concurrency-list \"1 2 4 ...\"] [--health-path </health|/healthcheck>] [--extra-args \"--flag val ...\"]"
       exit 1 ;;
   esac
 done
@@ -70,6 +87,12 @@ fi
 mkdir -p "$OUT_DIR"
 RES_LOG="${OUT_DIR}/${LABEL}.res"
 : > "$RES_LOG"  # truncate/create
+{
+  echo "label=${LABEL}  base_url=${BASE_URL}  model=${MODEL}"
+  echo "num_prompts=[${NUM_PROMPTS_LIST[*]}]  concurrency=[${CONCURRENCY_LIST[*]}]"
+  echo "dataset=${DATASET_PATH}"
+  echo "extra_args=[${EXTRA_ARGS[*]}]"
+} | tee -a "$RES_LOG"
 
 # Confirm the endpoint is actually up before burning hours on a sweep.
 if ! curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}${HEALTH_PATH}" | grep -q "200"; then
@@ -79,8 +102,22 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
-for CONCURRENCY in "${CONCURRENCY_LIST[@]}"; do
-  echo "Running sweep point: concurrency=${CONCURRENCY}" | tee -a "$RES_LOG"
+if [[ ${#NUM_PROMPTS_LIST[@]} -ne 1 && ${#NUM_PROMPTS_LIST[@]} -ne ${#CONCURRENCY_LIST[@]} ]]; then
+  echo "--num-prompts must have 1 value or exactly as many as --concurrency-list" >&2
+  exit 1
+fi
+
+for IDX in "${!CONCURRENCY_LIST[@]}"; do
+  CONCURRENCY="${CONCURRENCY_LIST[$IDX]}"
+  if [[ ${#NUM_PROMPTS_LIST[@]} -eq 1 ]]; then
+    NUM_PROMPTS="${NUM_PROMPTS_LIST[0]}"
+  else
+    NUM_PROMPTS="${NUM_PROMPTS_LIST[$IDX]}"
+  fi
+  if [[ "$NUM_PROMPTS" -lt "$CONCURRENCY" ]]; then
+    echo "WARNING: concurrency=${CONCURRENCY} with only ${NUM_PROMPTS} prompts - the run will never reach that concurrency" | tee -a "$RES_LOG"
+  fi
+  echo "Running sweep point: concurrency=${CONCURRENCY} num_prompts=${NUM_PROMPTS}" | tee -a "$RES_LOG"
 
   vllm bench serve \
     --backend vllm \
@@ -94,6 +131,7 @@ for CONCURRENCY in "${CONCURRENCY_LIST[@]}"; do
     --save-result \
     --result-dir "$OUT_DIR" \
     --result-filename "${LABEL}_c${CONCURRENCY}.json" \
+    "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "$RES_LOG"
 done
 
