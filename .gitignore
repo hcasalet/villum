@@ -259,3 +259,6 @@ experiments/
 paper/
 cheat_sheet.txt
 scratch
+
+# per-deployment node addresses; commit disagg_hosts.env.example instead
+vllm/scripts/disagg_hosts.env

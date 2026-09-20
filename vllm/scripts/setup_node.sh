@@ -3,16 +3,16 @@
 #
 #   ROLE=cuda bash setup_node.sh    # prefill node: CUDA venv only (goldenberry: A100 + EPYC Milan)
 #   ROLE=cpu  bash setup_node.sh    # decode node:  CPU venv only  (needs AMX for gpt-oss-20b MXFP4)
-#   ROLE=both bash setup_node.sh    # single-VM setup, what setup_g5.sh did
+#   ROLE=both bash setup_node.sh    # both venvs on one host (single-VM disagg)
 #
 # Run as exouser:  ROLE=cuda bash setup_node.sh 2>&1 | tee ~/setup_node.log
 # Re-runnable; each step is skipped if already done.
 #
-# Derived from setup_g5.sh (2026-09-13). Differences:
+# Supersedes the earlier single-purpose setup scripts. Key points:
 #   * ROLE switch: a prefill-only node skips the 20-40 min CPU source build entirely.
 #   * hf download --exclude "original/*" "metal/*": the unsloth repo ships a 13 GB Apple Metal
 #     build that vLLM never loads (it reads model.safetensors.index.json + the 3 MXFP4 shards).
-#     Downloading it is what filled disagg-inf-1's 58 GB root on 2026-09-19.
+#     Downloading it can fill a small (~60 GB) root volume.
 #   * uv cache is cleaned at the end (~7 GB; only needed while building).
 #   * AMX check is fatal for ROLE=cpu instead of a warning, and skipped for ROLE=cuda.
 set -euo pipefail
@@ -31,8 +31,11 @@ log(){ printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 # ---------------------------------------------------------------- 0. hardware sanity
 log "Hardware check (ROLE=$ROLE)"
 lscpu | grep -E 'Model name|^CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket'
-FLAGS=$(lscpu | grep -oE 'amx_bf16|amx_tile|avx512_bf16|avx512f' | sort -u | tr '\n' ' ')
-echo "ISA flags: ${FLAGS:-none of amx/avx512}"
+# `|| true` is load-bearing: grep exits 1 when it matches nothing, and under `set -e` +
+# `pipefail` that kills the script. On AMD EPYC Milan (Zen 3) NONE of these flags exist, so
+# setup_g5.sh's version of this line would abort a prefill-node setup before step 1.
+FLAGS=$(lscpu | grep -oE 'amx_bf16|amx_tile|avx512_bf16|avx512f' | sort -u | tr '\n' ' ') || true
+echo "ISA flags: ${FLAGS:-none (expected on AMD EPYC; irrelevant for a prefill node)}"
 if [ "$ROLE" != cuda ]; then
   # The decode node runs gpt-oss-20b MXFP4 on CPU. Without amx_bf16 the AMX kernels are not
   # built by -march=native and the MXFP4 CPU path is not expected to work. Fail early rather
@@ -123,10 +126,14 @@ log "Model download (needs HF_TOKEN if gated)"
 ANYVENV=$([ "$ROLE" = cpu ] && echo "$WORK/villum-cpu/.venv" || echo "$WORK/villum-cuda/.venv")
 source "$ANYVENV/bin/activate"
 uv pip install -q huggingface_hub
-# --exclude: original/ is the raw OpenAI checkpoint metadata, metal/ is a 13 GB Apple Metal
-# build. vLLM loads neither. See experiments/debug/filesystem_status.txt.
-hf download unsloth/gpt-oss-20b --exclude "original/*" "metal/*" >/dev/null || \
-  huggingface-cli download unsloth/gpt-oss-20b --exclude "original/*" "metal/*"
+# Use the Python API, NOT `hf download ... --exclude "a" "b"`: the CLI treats bare arguments
+# after the repo id as explicit FILENAMES, so the second pattern becomes a file to fetch and
+# --exclude is silently dropped ("Ignoring `--exclude` since filenames have been explicitly
+# set"), then 404s on metal/%2A. `huggingface-cli` is no longer a working fallback either.
+# What we skip: original/ (raw OpenAI checkpoint metadata, 24 KB) and metal/ (a 13 GB Apple
+# Metal build). vLLM loads neither -- it reads model.safetensors.index.json plus the three
+# MXFP4 shards; pulling the whole repo roughly doubles the on-disk model size for nothing.
+python -c "from huggingface_hub import snapshot_download as d; print('snapshot:', d('unsloth/gpt-oss-20b', ignore_patterns=['original/*','metal/*']))"
 deactivate
 du -sh "$HF_HOME/hub"
 
@@ -135,4 +142,8 @@ log "Cleaning uv cache (~7 GB; venvs are already built)"
 rm -rf "$UV_CACHE_DIR"
 df -h / | tail -1
 
-log "DONE (ROLE=$ROLE). Next: see run_disagg_2vm.sh"
+log "DONE (ROLE=$ROLE)."
+echo "Next, once per node:"
+echo "  cp $WORK/villum-cuda/vllm/scripts/disagg_hosts.env.example <clone>/vllm/scripts/disagg_hosts.env"
+echo "  # fill in PREFILL_HOST / DECODE_HOST, then: source <clone>/vllm/scripts/disagg_hosts.env"
+echo "  bash <clone>/vllm/scripts/run_disagg_2vm.sh probe"
