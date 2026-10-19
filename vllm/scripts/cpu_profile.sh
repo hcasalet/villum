@@ -37,7 +37,10 @@ until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; do
   kill -0 $pid 2>/dev/null || { echo; echo "!! server died; tail of $OUT/serve.log:"; tail -n 40 "$OUT/serve.log"; exit 1; }
   sleep 5; printf .
 done; echo " ok"
-( source "$CPU_VENV/bin/activate"
+# The bench CLIENT must be offline too: online, it fetches the tokenizer of the repo's
+# newest revision and moves the HF cache's refs/main to a snapshot that has no weights,
+# after which every offline server start fails with "Cannot find any model weights".
+( source "$CPU_VENV/bin/activate"; export HF_HUB_OFFLINE=1
   vllm bench serve --backend vllm --base-url "http://127.0.0.1:$PORT" --model "$MODEL" \
     --dataset-name random --random-input-len 128 --random-output-len 16 --random-range-ratio 0.0 \
     --num-prompts 2 --max-concurrency 1 --temperature 0 --ignore-eos --profile \

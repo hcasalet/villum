@@ -152,7 +152,7 @@ run_one() {
     kill -0 $pid 2>/dev/null || { echo; echo "!! server died; tail of $log:"; tail -n 40 "$log"; return 1; }
     sleep 5; printf .
   done; echo " ok"
-  ( source "$CPU_VENV/bin/activate"
+  ( source "$CPU_VENV/bin/activate"; export HF_HUB_OFFLINE=1   # see cpu_profile.sh: an online client moves refs/main
     bash "$SWEEP" --base-url "http://127.0.0.1:$PORT" --model "$m" --label "$s" --out-dir "$OUT" \
       --health-path /health --dataset-name random --input-len "$INPUT_LEN" --output-len "$OUTPUT_LEN" \
       --concurrency-list "1 16" --num-prompts "16 64" \
