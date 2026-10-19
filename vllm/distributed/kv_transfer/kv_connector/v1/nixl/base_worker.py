@@ -1057,8 +1057,56 @@ class NixlBaseConnectorWorker:
 
         return dict(sorted(kv_caches.items(), key=lambda kv: natural_key(kv[0])))
 
+    def _log_kv_layout(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Diagnostic: log the model runner's ORIGINAL kv_caches order and what
+        drives it, before _canonical_kv_caches re-sorts it.
+
+        Opt-in with VLLM_NIXL_LOG_KV_LAYOUT=1. Run it on both legs and diff the
+        lines to see whether (and why) the platforms enumerate layers differently.
+        Per layer: index, KV cache group, spec class, sliding window, block size.
+        """
+        if os.environ.get("VLLM_NIXL_LOG_KV_LAYOUT", "0") != "1":
+            return
+
+        def idx(name: str) -> str:
+            m = re.search(r"layers\.(\d+)\.", name)
+            return m.group(1) if m else name
+
+        group_of = {
+            ln: gid
+            for gid, g in enumerate(self.kv_cache_config.kv_cache_groups)
+            for ln in g.layer_names
+        }
+        rows, by_ptr = [], {}
+        for ln, t in kv_caches.items():
+            spec = self._layer_specs.get(ln)
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs.get(ln, spec)
+            rows.append(
+                f"{idx(ln)}:g{group_of.get(ln, '?')}:{type(spec).__name__}"
+                f":sw={getattr(spec, 'sliding_window', None)}"
+                f":bs={getattr(spec, 'block_size', None)}"
+            )
+            by_ptr.setdefault(t.data_ptr(), []).append(idx(ln))
+        groups = [
+            f"g{gid}={type(g.kv_cache_spec).__name__}[{len(g.layer_names)} layers]"
+            for gid, g in enumerate(self.kv_cache_config.kv_cache_groups)
+        ]
+        shared = [v for v in by_ptr.values() if len(v) > 1]
+        logger.info(
+            "[kv-layout] platform=%s layers=%d groups=%s",
+            current_platform.device_type, len(kv_caches), " ".join(groups),
+        )
+        logger.info("[kv-layout] original order: %s", " ".join(idx(n) for n in kv_caches))
+        logger.info("[kv-layout] per layer (idx:group:spec:sw:bs): %s", " ".join(rows))
+        logger.info(
+            "[kv-layout] layers sharing one buffer: %s",
+            " ".join("+".join(v) for v in shared) if shared else "none",
+        )
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        self._log_kv_layout(kv_caches)
         kv_caches = self._canonical_kv_caches(kv_caches)
 
         # Detect packed allocation: all tensors are strided views into the

@@ -49,7 +49,11 @@ PREFILL_PORT=8401; DECODE_PORT=8402; PROXY_PORT=8192; BASELINE_PORT=8500
 PREFILL_SC_PORT=5559; DECODE_SC_PORT=5659
 CUDA_VENV=$WORK/villum-cuda/.venv; CPU_VENV=$WORK/villum-cpu/.venv
 LOGROOT=$WORK/logs; mkdir -p "$LOGROOT"
-COMMON="--block-size 128 --max-model-len 4096 --tensor-parallel-size 1 --dtype bfloat16 --disable-hybrid-kv-cache-manager"
+# MAX_MODEL_LEN must be >= the longest input + output in a sweep (input-length sweeps need
+# well over the old 4096). It is part of COMMON, so every leg and the baseline get the same value
+# -- start ALL servers with the same MAX_MODEL_LEN, as with every other serving flag.
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+COMMON="--block-size 128 --max-model-len $MAX_MODEL_LEN --tensor-parallel-size 1 --dtype bfloat16 --disable-hybrid-kv-cache-manager"
 EXTRA=${EXTRA:-}
 PREFILL_KV_BUFFER=cpu   # see Issue 8 above; not a knob on two nodes
 # MUST match PREFILL_GPU_UTIL. Every benchmark arm has to use identical execution flags; a

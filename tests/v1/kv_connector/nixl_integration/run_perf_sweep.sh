@@ -23,6 +23,19 @@
 #   ./run_perf_sweep.sh --base-url http://localhost:8300 \
 #       --model unsloth/gpt-oss-20b --label replicas \
 #       --out-dir ../../../../experiments/replicas/gpt-oss-20b
+#
+# Example (fixed-length synthetic prompts, for input-length sweeps). One run per
+# input length; put the length in the label so results do not overwrite each other:
+#   for ISL in 512 2048 8192 16384; do
+#     ./run_perf_sweep.sh --base-url http://localhost:8192 \
+#         --model Qwen/Qwen3-1.7B --label disagg_isl${ISL} \
+#         --dataset-name random --input-len $ISL --output-len 32 \
+#         --concurrency-list "1 16" --num-prompts "16 64" \
+#         --extra-args "--temperature 0 --ignore-eos --num-warmups 4" \
+#         --out-dir ../../../../experiments/jetstream2/isl_sweep
+#   done
+# The servers' --max-model-len must be >= input-len + output-len (+ a few tokens of
+# tokenizer special tokens), or long points are rejected.
 
 set -xe
 
@@ -30,7 +43,10 @@ BASE_URL=""
 MODEL=""
 LABEL=""
 OUT_DIR=""
-DATASET_PATH="./ShareGPT_V3_unfiltered_cleaned_split.json"
+DATASET_NAME="sharegpt"    # sharegpt | random
+DATASET_PATH="./ShareGPT_V3_unfiltered_cleaned_split.json"   # sharegpt only
+INPUT_LEN=""    # random only: tokens per prompt (fixed; range ratio 0)
+OUTPUT_LEN=""   # random only: tokens generated per request
 NUM_PROMPTS_LIST=(1024)   # one value = same for every point; or one per concurrency level
 CONCURRENCY_LIST=(1 2 4 8 16 32 64 96 128 256)
 HEALTH_PATH="/healthcheck"  # /health for a bare (non-proxied) vllm serve
@@ -46,8 +62,14 @@ while [[ $# -gt 0 ]]; do
       LABEL="$2"; shift 2 ;;
     --out-dir)
       OUT_DIR="$2"; shift 2 ;;
+    --dataset-name)
+      DATASET_NAME="$2"; shift 2 ;;
     --dataset-path)
       DATASET_PATH="$2"; shift 2 ;;
+    --input-len)
+      INPUT_LEN="$2"; shift 2 ;;
+    --output-len)
+      OUTPUT_LEN="$2"; shift 2 ;;
     --num-prompts)
       # Either a single value applied to every concurrency point, or a
       # space-separated list matched positionally to --concurrency-list.
@@ -74,7 +96,7 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 --base-url <url> --model <name> --label <label> --out-dir <dir> [--dataset-path <path>] [--num-prompts <n>] [--concurrency-list \"1 2 4 ...\"] [--health-path </health|/healthcheck>] [--extra-args \"--flag val ...\"]"
+      echo "Usage: $0 --base-url <url> --model <name> --label <label> --out-dir <dir> [--dataset-name sharegpt|random] [--dataset-path <path>] [--input-len <n>] [--output-len <n>] [--num-prompts <n>] [--concurrency-list \"1 2 4 ...\"] [--health-path </health|/healthcheck>] [--extra-args \"--flag val ...\"]"
       exit 1 ;;
   esac
 done
@@ -84,13 +106,34 @@ if [[ -z "$BASE_URL" || -z "$MODEL" || -z "$LABEL" || -z "$OUT_DIR" ]]; then
   exit 1
 fi
 
+case "$DATASET_NAME" in
+  sharegpt)
+    if [[ -n "$INPUT_LEN" || -n "$OUTPUT_LEN" ]]; then
+      echo "--input-len/--output-len apply only to --dataset-name random" >&2
+      exit 1
+    fi
+    DATASET_ARGS=(--dataset-name sharegpt --dataset-path "$DATASET_PATH") ;;
+  random)
+    if [[ -z "$INPUT_LEN" || -z "$OUTPUT_LEN" ]]; then
+      echo "--dataset-name random needs both --input-len and --output-len" >&2
+      exit 1
+    fi
+    # Range ratio 0 = every prompt exactly INPUT_LEN tokens, so a point measures one length,
+    # not an average over a distribution. Pass --ignore-eos in --extra-args to force OUTPUT_LEN.
+    DATASET_ARGS=(--dataset-name random --random-input-len "$INPUT_LEN"
+                  --random-output-len "$OUTPUT_LEN" --random-range-ratio 0.0) ;;
+  *)
+    echo "--dataset-name must be sharegpt or random" >&2
+    exit 1 ;;
+esac
+
 mkdir -p "$OUT_DIR"
 RES_LOG="${OUT_DIR}/${LABEL}.res"
 : > "$RES_LOG"  # truncate/create
 {
   echo "label=${LABEL}  base_url=${BASE_URL}  model=${MODEL}"
   echo "num_prompts=[${NUM_PROMPTS_LIST[*]}]  concurrency=[${CONCURRENCY_LIST[*]}]"
-  echo "dataset=${DATASET_PATH}"
+  echo "dataset_args=[${DATASET_ARGS[*]}]"
   echo "extra_args=[${EXTRA_ARGS[*]}]"
 } | tee -a "$RES_LOG"
 
@@ -123,8 +166,7 @@ for IDX in "${!CONCURRENCY_LIST[@]}"; do
     --backend vllm \
     --base-url "$BASE_URL" \
     --model "$MODEL" \
-    --dataset-name sharegpt \
-    --dataset-path "$DATASET_PATH" \
+    "${DATASET_ARGS[@]}" \
     --num-prompts "$NUM_PROMPTS" \
     --request-rate inf \
     --max-concurrency "$CONCURRENCY" \
