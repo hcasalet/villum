@@ -1063,8 +1063,13 @@ class NixlBaseConnectorWorker:
 
         Opt-in with VLLM_NIXL_LOG_KV_LAYOUT=1. Run it on both legs and diff the
         lines to see whether (and why) the platforms enumerate layers differently.
-        Per layer: index, KV cache group, spec class, sliding window, block size.
+        Per layer: index, KV cache group, spec class, sliding window, block size,
+        indexes_kv_by_block_stride. Also lists every AttentionSpec field whose value
+        differs across layers (a differing field blocks FullAttentionSpec.merge).
         """
+        from dataclasses import fields as dc_fields
+
+        from vllm.v1.kv_cache_interface import AttentionSpec
         if os.environ.get("VLLM_NIXL_LOG_KV_LAYOUT", "0") != "1":
             return
 
@@ -1077,7 +1082,7 @@ class NixlBaseConnectorWorker:
             for gid, g in enumerate(self.kv_cache_config.kv_cache_groups)
             for ln in g.layer_names
         }
-        rows, by_ptr = [], {}
+        rows, by_ptr, field_vals = [], {}, {}
         for ln, t in kv_caches.items():
             spec = self._layer_specs.get(ln)
             if isinstance(spec, UniformTypeKVCacheSpecs):
@@ -1086,7 +1091,12 @@ class NixlBaseConnectorWorker:
                 f"{idx(ln)}:g{group_of.get(ln, '?')}:{type(spec).__name__}"
                 f":sw={getattr(spec, 'sliding_window', None)}"
                 f":bs={getattr(spec, 'block_size', None)}"
+                f":ixbs={getattr(spec, 'indexes_kv_by_block_stride', None)}"
             )
+            if isinstance(spec, AttentionSpec):
+                for f in dc_fields(AttentionSpec):
+                    v = str(getattr(spec, f.name))
+                    field_vals.setdefault(f.name, {}).setdefault(v, []).append(idx(ln))
             by_ptr.setdefault(t.data_ptr(), []).append(idx(ln))
         groups = [
             f"g{gid}={type(g.kv_cache_spec).__name__}[{len(g.layer_names)} layers]"
@@ -1098,7 +1108,20 @@ class NixlBaseConnectorWorker:
             current_platform.device_type, len(kv_caches), " ".join(groups),
         )
         logger.info("[kv-layout] original order: %s", " ".join(idx(n) for n in kv_caches))
-        logger.info("[kv-layout] per layer (idx:group:spec:sw:bs): %s", " ".join(rows))
+        logger.info(
+            "[kv-layout] per layer (idx:group:spec:sw:bs:ixbs): %s", " ".join(rows)
+        )
+        differing = [
+            f"{name}={{"
+            + "; ".join(f"{v}: {','.join(ls)}" for v, ls in vals.items())
+            + "}"
+            for name, vals in field_vals.items()
+            if len(vals) > 1
+        ]
+        logger.info(
+            "[kv-layout] AttentionSpec fields differing across layers: %s",
+            " ".join(differing) if differing else "none",
+        )
         logger.info(
             "[kv-layout] layers sharing one buffer: %s",
             " ".join("+".join(v) for v in shared) if shared else "none",
