@@ -393,8 +393,15 @@ class NixlBaseConnectorWorker:
         if self.device_type == "cpu":
             numa_core_list = current_platform.discover_numa_topology()
             # setup one last core in each numa for kv transfer.
+            # Only cores this process may run on: under a scheduler cgroup (Slurm) the
+            # machine-wide last core of a NUMA node is often not allocated to the job,
+            # and sched_setaffinity() then fails with EINVAL if none of the requested
+            # cores are allowed (ACES, 2026-10-29). Skip NUMA nodes with no allowed core.
+            allowed = os.sched_getaffinity(0)
             rsv_cores_for_kv = [
-                max(each_numa_core_list) for each_numa_core_list in numa_core_list
+                max(c for c in each_numa_core_list if c in allowed)
+                for each_numa_core_list in numa_core_list
+                if any(c in allowed for c in each_numa_core_list)
             ]
 
             if rsv_cores_for_kv:
