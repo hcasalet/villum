@@ -483,6 +483,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     usage=final_usage_info,
                     system_fingerprint=self.system_fingerprint,
                     metrics=stream_per_request_metrics,
+                    kv_transfer_params=(
+                        last_res.kv_transfer_params if last_res is not None else None
+                    ),
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True

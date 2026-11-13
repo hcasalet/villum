@@ -670,3 +670,6 @@ class CompletionStreamResponse(OpenAIBaseModel):
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None
     metrics: PerRequestTimingMetrics | None = None
+    # villum write-back: set on the final usage chunk when the engine returned
+    # kv_transfer_params (P/D), as in the non-streaming CompletionResponse.
+    kv_transfer_params: dict[str, Any] | None = None

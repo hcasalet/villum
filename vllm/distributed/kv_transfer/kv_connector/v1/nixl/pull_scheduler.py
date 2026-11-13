@@ -127,11 +127,21 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params.get("do_remote_prefill") and self.is_bidirectional_kv_xfer_enabled
         ):
             self._reqs_in_batch.add(request.request_id)
-        if self.use_host_buffer and params.get("do_remote_decode"):
+        writeback_only = bool(params.get("writeback_only"))
+        if (
+            self.use_host_buffer
+            and params.get("do_remote_decode")
+            and not writeback_only
+        ):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
+            # (villum write-back: a writeback_only request is never pulled by a
+            # decoder, so its blocks need no copy to the host buffer.)
             self._reqs_need_save[request.request_id] = request
-        elif params.get("do_remote_prefill") or (
+        # villum F2 fix: with a host buffer, a P node that also reads back blocks
+        # from D (bidirectional readback / write-back) must register that read too;
+        # this used to be an ``elif`` of the save branch, so P never read from D.
+        if params.get("do_remote_prefill") or (
             params.get("do_remote_decode")
             and self.is_bidirectional_kv_xfer_enabled
             and not params.get("_remote_blocks_processed")
@@ -221,6 +231,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             return False, None
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
+            return False, None
+
+        if is_p_node and params.get("writeback_only"):
+            # villum write-back: P pulled the decoder's answer blocks only to keep
+            # them (prefix cache + offload store / master log). No decoder will read
+            # this request, so free its blocks now instead of holding a lease.
             return False, None
 
         if request.status not in (
