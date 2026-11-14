@@ -55,6 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     get_representative_spec_type,
+    unpack_cpu_attn_amx_kv,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -368,6 +369,8 @@ class NixlBaseConnectorWorker:
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
         self.enable_heterogeneous_attn_post_process = False
+        # Remote CPU_ATTN engines whose blocks need unpacking when read back.
+        self._cpu_attn_remote_engines: set[EngineId] = set()
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
@@ -1913,6 +1916,11 @@ class NixlBaseConnectorWorker:
                 "hint heterogeneous attn post process"
             )
             self.enable_heterogeneous_attn_post_process = True
+        if (
+            nixl_agent_meta.attn_backend_name == "CPU_ATTN"
+            and self.backend_name != "CPU_ATTN"
+        ):
+            self._cpu_attn_remote_engines.add(nixl_agent_meta.engine_id)
 
         # Heterogeneous TP requires head-splitting, which only works with
         # HND layout. MLA and replicated-KV cases don't split on heads.
@@ -2017,6 +2025,21 @@ class NixlBaseConnectorWorker:
                 req_id,
                 ",".join(map(str, local_block_ids)),
             )
+
+    def _unpack_cpu_attn_kv_on_receive(self, meta: ReqMeta):
+        """Convert blocks just read from a CPU_ATTN peer to the local layout."""
+        if self._is_hma_required or self.kv_cache_layout != "HND":
+            raise RuntimeError(
+                "Reading KV back from a CPU_ATTN peer needs HND layout and no HMA"
+            )
+        caches = (
+            self.host_xfer_buffers if self.use_host_buffer else self.device_kv_caches
+        )
+        block_ids = list(meta.local_physical_block_ids[0])
+        self._debug_dump_kv("readback_raw", block_ids, caches)
+        for cache in caches.values():
+            unpack_cpu_attn_amx_kv(cache, block_ids)
+        self._debug_dump_kv("readback_unpacked", block_ids, caches)
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
         """copy kv from device to host buffer."""
@@ -2249,6 +2272,8 @@ class NixlBaseConnectorWorker:
                 continue
 
             assert meta.remote is not None
+            if meta.remote.engine_id in self._cpu_attn_remote_engines:
+                self._unpack_cpu_attn_kv_on_receive(meta)
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
